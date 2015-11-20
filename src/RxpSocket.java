@@ -250,7 +250,7 @@ public class RxpSocket {
 		// Note the implementation assumes an ordered list
 		while (!unacked.isEmpty()){
 			RxpPacket nextUnacked = unacked.getFirst();
-			if(lastAck - (nextUnacked.seq + nextUnacked.payloadLength) > 0){
+			if(lastAck - nextUnacked.seq > 0){
 				hasChanged = true;
 				unacked.removeFirst();
 			} else{
@@ -259,7 +259,13 @@ public class RxpSocket {
 		}
 		
 		// Reset the send timeout timer
-		if (hasChanged) sendTimeout.restart();
+		if (hasChanged){
+			if (unacked.isEmpty()){
+				sendTimeout.stop();
+			} else{
+				sendTimeout.restart();
+			}
+		}
 
 		// On some states, an Ack can cause a state change. This should only
 		// happen when all prior packets have been acknowledged.
@@ -347,6 +353,9 @@ public class RxpSocket {
 		RxpPacket hashPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(),
 				(short) (RxpPacket.ACK | RxpPacket.SYN), nonce);
 		sendPacket(hashPkt);
+		
+		// Update the seq number
+		seq += hashPkt.payloadLength;
 
 		// Update the state
 		state = States.SYN_RECEIVED;
@@ -439,7 +448,7 @@ public class RxpSocket {
 		}
 
 		// If the packet should is not addressed to the current port, drop it.
-		if (packet.sourcePort != rxpSrcPort) return;
+		if (packet.destPort != rxpSrcPort) return;
 		
 		// If the packet has the acknowledgement flag, update the receive
 		// buffer. Note that state changes caused by ACK packets are handled
@@ -505,6 +514,11 @@ public class RxpSocket {
 		int tail;
 		synchronized (iStream) {
 			tail = winHead + winLength;
+			
+			// Check if the array is already wrapping around
+			if (tail >= winTotalLength){
+				tail -= winTotalLength;
+			}
 		}
 		
 		int spaceAfterTail = winTotalLength - tail;
@@ -512,7 +526,7 @@ public class RxpSocket {
 		// Copy the payload to the window
 		// No need to synchronize this part since it writes on the tail while
 		// the other thread gets data from the head.
-		if (packet.payloadLength < spaceAfterTail){
+		if (packet.payloadLength < spaceAfterTail || tail < winHead){
 			System.arraycopy(packet.payload, 0, rcvWindow, tail, packet.payloadLength);
 		} else{
 			System.arraycopy(packet.payload, 0, rcvWindow, tail, spaceAfterTail);

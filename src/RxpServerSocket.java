@@ -80,10 +80,12 @@ public class RxpServerSocket {
 				} else {
 					// The packet is for a new connection. If it is not a SYN
 					// packet, discard it.
-					if (!rxpPacket.isSyn) continue;
+					if (rxpPacket.isCorrupt() || !rxpPacket.isSyn) continue;
 					
 					// Create a new connection
 					RxpSocket rxpSocket = new RxpSocket(rxpSrcPort, rxpPacket.sourcePort, packet.getSocketAddress(), udpSocket);
+					rxpSocket.rcvPacket(rxpPacket);
+					
 					connections.put(key, rxpSocket);
 					
 					// Add the connection to the list of unaccepted connections.
