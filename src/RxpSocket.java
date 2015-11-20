@@ -723,6 +723,7 @@ public class RxpSocket {
 		public SendStream() {
 			streamTimer = new Timer(TIMEOUT_SEND_STREAM, e -> sendShortPacket());
 			streamTimer.setInitialDelay(TIMEOUT_SEND_STREAM);
+			streamTimer.setRepeats(false);
 			
 			buffer = new byte[MAXIMUM_PAYLOAD_SIZE];
 			length = 0;
@@ -737,24 +738,19 @@ public class RxpSocket {
 			synchronized (this) {
 				buffer[length] = (byte) b;
 				length++;
-			}
 			
-			
-			// If the buffer is full, send the packet
-			if (length == MAXIMUM_PAYLOAD_SIZE){
-				RxpPacket packet = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.ACK, buffer);
-				sendPacket(packet);
-				seq += length;
-				
-				// Reset the input buffer
-				synchronized (this) {
+				// If the buffer is full, send the packet
+				if (length == MAXIMUM_PAYLOAD_SIZE){
+					RxpPacket packet = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.ACK, buffer);
+					sendPacket(packet);
+					seq += length;
 					length = 0;
+				} else{
+					// Wait to see if more bytes arrive
+					if (!streamTimer.isRunning())
+						streamTimer.start();
 				}
-			} else{
-				// Wait to see if more bytes arrive
-				if (!streamTimer.isRunning())
-					streamTimer.start();
-			}			
+			}
 		}
 		
 		/**
@@ -766,16 +762,16 @@ public class RxpSocket {
 				payload = new byte[length];
 				System.arraycopy(buffer, 0, payload, 0, length);
 				length = 0;
-			}		
-			
-			// Increase the sequence number
-			seq += payload.length;
-			
-			RxpPacket packet = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.ACK, payload);
-			try {
-				sendPacket(packet);
-			} catch (IOException e) {
-			}	
+				
+				RxpPacket packet = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.ACK, payload);
+				try {
+					sendPacket(packet);
+				} catch (IOException e) {
+				}
+				
+				// Increase the sequence number
+				seq += payload.length;
+			}
 		}
 	}
 }
