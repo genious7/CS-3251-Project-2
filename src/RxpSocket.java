@@ -157,8 +157,8 @@ public class RxpSocket {
 		sendPacket(finPkt);
 	}
 	
-	public void connect(SocketAddress address, int port) throws IOException {
-		connect(address, (short)port);
+	public void connect(SocketAddress address, int port, int srcUdpPort) throws IOException {
+		connect(address, (short)port, (short) srcUdpPort);
 	}
 	
 	/**
@@ -172,7 +172,7 @@ public class RxpSocket {
 	 * @throws IOException
 	 *             If the connection cannot be established
 	 */
-	public void connect(SocketAddress address, short port) throws IOException{
+	public void connect(SocketAddress address, short port, short srcUdpPort) throws IOException{
 		// Verify that the socket is not already in use.
 		if (state != States.CLOSED) {
 			throw new IllegalStateException("This socket is already connected");
@@ -184,7 +184,7 @@ public class RxpSocket {
 		
 		// Create a new UDP socket
 		udpAddress = address;
-		socket = new DatagramSocket();
+		socket = new DatagramSocket(srcUdpPort);
 		
 		// Initialize the sequence number
 		seq = new Random().nextInt();

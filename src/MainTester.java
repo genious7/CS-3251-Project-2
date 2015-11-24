@@ -10,9 +10,12 @@ public class MainTester {
 	
 	public static void main(String[] args) throws IOException {
 		
+		// Test by running
+		// netEmu.py 5000 -l 20
+		
 		if (args.length == 0){
 			serverSocket = new RxpServerSocket();
-			serverSocket.listen(2300, 2300);
+			serverSocket.listen(8001, 2300);
 			socket = serverSocket.accept();
 			
 			InputStream reader = socket.getInputStream();
@@ -30,8 +33,7 @@ public class MainTester {
 			
 		}else{
 			socket = new RxpSocket();
-			socket.connect(new InetSocketAddress("127.0.0.1", 2300), 2300);
-			
+			socket.connect(new InetSocketAddress("127.0.0.1", 5000), 2300, 8000);
 			
 			Scanner scanner = new Scanner(System.in);
 			OutputStream writer = socket.getOutputStream();
