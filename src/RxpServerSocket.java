@@ -16,19 +16,22 @@ public class RxpServerSocket {
 	private short rxpSrcPort;
 	
 	/** A list of unaccepted connections*/
-	private BlockingQueue<RxpSocket> unaccepted;
+	private final BlockingQueue<RxpSocket> unaccepted;
 	
 	/** A list of all the RxpSockets bound to this serverSocket*/
-	private Map<MultiplexingKey, RxpSocket> connections;
+	private final Map<MultiplexingKey, RxpSocket> connections;
 	
 	/** A thread responsible for reading all the packets from the UDP port*/
-	Thread packetReader;
+	private final Thread packetReader;
 	
 	public RxpServerSocket() {
 		connections = new ConcurrentHashMap<>();
 		unaccepted = new LinkedBlockingQueue<>();
-		
 		packetReader = new Thread(() -> readPacket());
+	}
+	
+	public void listen(int udpPort, int rxpPort) throws SocketException{
+		listen(udpPort, (short)rxpPort);
 	}
 	
 	public void listen(int udpPort, short rxpPort) throws SocketException{
@@ -44,8 +47,13 @@ public class RxpServerSocket {
 	 * @return The socket used by the connection
 	 * @throws InterruptedException
 	 */
-	public RxpSocket accept() throws InterruptedException{
-		return unaccepted.take();
+	public RxpSocket accept(){
+		try {
+			return unaccepted.take();
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+			return null;
+		}
 	}
 	
 	public void close() throws IOException{
@@ -56,7 +64,7 @@ public class RxpServerSocket {
 		
 		// Don't close the socket here. If the socket is closed, the server
 		// won't be able to gracefully close the connections with the client.
-	}	
+	}
 	
 	private void readPacket(){
 		// Create a byte array in order to receive and process packets
@@ -83,7 +91,7 @@ public class RxpServerSocket {
 					if (rxpPacket.isCorrupt() || !rxpPacket.isSyn) continue;
 					
 					// Create a new connection
-					RxpSocket rxpSocket = new RxpSocket(rxpSrcPort, rxpPacket.sourcePort, packet.getSocketAddress(), udpSocket);
+					RxpSocket rxpSocket = new RxpSocket(rxpSrcPort, rxpPacket.sourcePort, packet.getSocketAddress(), udpSocket, () -> connections.remove(key));
 					rxpSocket.rcvPacket(rxpPacket);
 					
 					connections.put(key, rxpSocket);
@@ -118,6 +126,16 @@ public class RxpServerSocket {
 			} else {
 				return false;
 			}
+		}
+		
+		@Override
+		public int hashCode() {
+			return udpAddress.hashCode() ^ rxpPort;
+		}
+		
+		@Override
+		public String toString() {
+			return udpAddress + ":" + rxpPort;
 		}
 	}
 }

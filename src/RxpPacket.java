@@ -27,6 +27,9 @@ public class RxpPacket {
 	public final boolean isFin;
 	public final byte[] payload;
 	private short checksum;
+	
+	// True if the header's length was incorrect
+	private final boolean isHeaderTooShort;
 
 	/**
 	 * Parses a UDP datagram into an RxpPacket.
@@ -35,29 +38,44 @@ public class RxpPacket {
 	 *            The received datagram as a byte array
 	 */
 	public RxpPacket(byte[] packet) {
-		// Wrap the array in a byte buffer
-		ByteBuffer buffer = ByteBuffer.wrap(packet);
+		if (packet.length < HEADER_SIZE){
+			// If the header is too short to be valid, set dummy values
+			isHeaderTooShort = true;
+			sourcePort = destPort = checksum = 0;
+			ack = seq = payloadLength = windowSize = 0;
+			isAck = isFin = isSyn = isNack = false;
+			checksum = 0;
+			payload = null;	
+		}else{
+			// If the header has at least the minimum length, try to parse it
+			isHeaderTooShort = false;
+			
+			// Wrap the array in a byte buffer
+			ByteBuffer buffer = ByteBuffer.wrap(packet);
 
-		// Parse the header parameters
-		sourcePort = buffer.getShort();
-		destPort = buffer.getShort();
-		seq = buffer.getInt();
-		ack = buffer.getInt();
-		payloadLength = buffer.getShort();
-		windowSize = buffer.getShort();
+			// Parse the header parameters
+			sourcePort = buffer.getShort();
+			destPort = buffer.getShort();
+			seq = buffer.getInt();
+			ack = buffer.getInt();
+			payloadLength = buffer.getShort();
+			windowSize = buffer.getShort();
 
-		// Parse the flags
-		short flags = buffer.getShort();
-		isAck = (flags & ACK) != 0;
-		isNack = (flags & NACK) != 0;
-		isSyn = (flags & SYN) != 0;
-		isFin = (flags & FIN) != 0;
+			// Parse the flags
+			short flags = buffer.getShort();
+			isAck = (flags & ACK) != 0;
+			isNack = (flags & NACK) != 0;
+			isSyn = (flags & SYN) != 0;
+			isFin = (flags & FIN) != 0;
 
-		checksum = buffer.getShort();
+			checksum = buffer.getShort();
 
-		// Read the payload
-		payload = new byte[payloadLength];
-		buffer.get(payload);
+			// Read the payload
+			payload = new byte[payloadLength];
+			buffer.get(payload);
+		}
+		
+		
 	}
 
 	/**
@@ -79,6 +97,7 @@ public class RxpPacket {
 	 *            The payload, as a byte array
 	 */
 	public RxpPacket(short srcPort, short dstPort, int seq, int ack, short windowSize, short flags, byte[] payload) {
+		this.isHeaderTooShort = false;
 		this.sourcePort = srcPort;
 		this.destPort = dstPort;
 		this.seq = seq;
@@ -103,7 +122,7 @@ public class RxpPacket {
 	 * @return True if the packet is corrupted, false otherwise
 	 */
 	public boolean isCorrupt() {
-		return calculateChecksum() != checksum;
+		return isHeaderTooShort || calculateChecksum() != checksum;
 	}
 
 	/**
@@ -189,5 +208,16 @@ public class RxpPacket {
 		this.ack = ack;
 	}
 	
+	@Override
+	public String toString() {
+		StringBuilder builder = new StringBuilder();
+		if (isAck) builder.append("ACK: " + ack);
+		if (isFin) builder.append(" FIN");
+		if (isSyn) builder.append(" SYN");
+		builder.append(" SEQ: " + seq);
+		if (isCorrupt()) builder.append(" Corrupted");
+		builder.append(" Payload Size:" + payloadLength);
+		return builder.toString();
+	}
 	
 }

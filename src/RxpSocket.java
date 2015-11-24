@@ -3,6 +3,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -31,6 +32,10 @@ public class RxpSocket {
 	}
 	// Timeout default values, in ms.
 	private static final int SEND_TIMEOUT = 500;
+	
+	// Default buffer size
+	private static final int DEFAULT_BUFFER_SIZE = 4096;  
+	
 	// For IP, the maximum size should be 1472 bytes once UDP headers are accounted for.
 	protected static final int MAXIMUM_SEGMENT_SIZE = 1472;
 	
@@ -87,11 +92,16 @@ public class RxpSocket {
 	/** The random nonce used in the four way handshake. This field is only used by the server.*/
 	private byte[] nonce; 
 	
+	private Runnable onClose;
+	
 	/**
 	 * Creates a new, unconnected {@link RxpSocket}.
 	 */
 	public RxpSocket() {
 		state = States.CLOSED;
+		
+		// Initialize the buffer to the default size
+		winTotalLength = DEFAULT_BUFFER_SIZE;
 		
 		// Initialize sending window and timeout timer
 		unacked = new LinkedBlockingDeque<>();
@@ -111,7 +121,7 @@ public class RxpSocket {
 		unacked = new ConcurrentLinkedDeque<RxpPacket>();
 	}
 	
-	protected RxpSocket(short srcPort, short dstPort, SocketAddress udpAddress, DatagramSocket udpSocket){
+	protected RxpSocket(short srcPort, short dstPort, SocketAddress udpAddress, DatagramSocket udpSocket, Runnable onClose){
 		// Initialize the timers
 		this();
 		
@@ -128,6 +138,9 @@ public class RxpSocket {
 		
 		// Initialize the sequence number
 		seq = new Random().nextInt();
+		
+		// Define the closing action
+		this.onClose = onClose;
 	}
 	
 	/**
@@ -142,9 +155,10 @@ public class RxpSocket {
 		// Send the FIN packet		
 		RxpPacket finPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.FIN, new byte[]{0});
 		sendPacket(finPkt);
-		
-		// Increase the sequence number
-		seq += finPkt.payloadLength;
+	}
+	
+	public void connect(SocketAddress address, int port) throws IOException {
+		connect(address, (short)port);
 	}
 	
 	/**
@@ -174,6 +188,17 @@ public class RxpSocket {
 		
 		// Initialize the sequence number
 		seq = new Random().nextInt();
+		
+		// Set the socket to close the udp socket at the end of the connection
+		onClose = new Runnable() {
+			@Override
+			public void run() {
+				socket.close();
+			}
+		};
+		
+		// Update the state
+		state = States.SYN_SENT;
 		
 		// Start a thread to handle received packets
 		packetReceiver = new Thread(() -> {
@@ -295,10 +320,8 @@ public class RxpSocket {
 		if (packet.payloadLength != 1)
 			throw new IllegalStateException("rcvFin - FIN packets must have a length of one");
 		
-		// Set the acknowledgement value
-		ack += packet.payloadLength;
-		
 		// Send the acknowledgement
+		ack += packet.payloadLength;
 		sendAck();
 		
 		// Change the state if applicable. Since duplicate packets have already
@@ -353,9 +376,6 @@ public class RxpSocket {
 		RxpPacket hashPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(),
 				(short) (RxpPacket.ACK | RxpPacket.SYN), nonce);
 		sendPacket(hashPkt);
-		
-		// Update the seq number
-		seq += hashPkt.payloadLength;
 
 		// Update the state
 		state = States.SYN_RECEIVED;
@@ -394,8 +414,7 @@ public class RxpSocket {
 
 		// Close the socket. This will cause the termination of the
 		// packetReceiver Thread
-		// TODO: Do not close the socket if this is the server
-		socket.close();
+		onClose.run();
 	}
 	
 	/**
@@ -428,8 +447,7 @@ public class RxpSocket {
 		RxpPacket hashPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.ACK, hash);
 		sendPacket(hashPkt);
 		
-		// Update the sequence number and the state
-		seq += hash.length;
+		// Update the state
 		state = States.MIC_RECEIVED;
 	}
 	
@@ -439,6 +457,8 @@ public class RxpSocket {
 	 * @throws IOException If a reply cannot be sent successfully
 	 */
 	protected void rcvPacket(RxpPacket packet) throws IOException {
+		//System.out.println(state + "," + packet);
+		
 		// If the packet is corrupted, it should be dropped.
 		// A NACK should be sent to the other endpoint.
 		if (packet.isCorrupt()) {
@@ -465,7 +485,8 @@ public class RxpSocket {
 		// already been acknowledged and resend the acknowledgement. This line
 		// handles duplicate packages.
 		if ((packet.isSyn || packet.isFin || packet.payloadLength > 0)
-				&& (ack - (packet.seq + packet.payloadLength - 1) > 0)) {
+				&& (ack - (packet.seq + packet.payloadLength - 1) > 0)
+				&& (state != States.LISTEN && state != States.SYN_SENT)) {
 			sendAck();
 			return;
 		}
@@ -538,7 +559,7 @@ public class RxpSocket {
 			winLength += packet.payloadLength;
 		}
 		
-		// Update the acknowledgement number
+		// Update the acknowledgement
 		ack += packet.payloadLength;
 		
 		// Send the acknowledgement
@@ -550,13 +571,17 @@ public class RxpSocket {
 	 * connection is closed.
 	 * 
 	 * @param packet
+	 * @throws IOException 
 	 */
-	private void checkHash(RxpPacket packet) {
+	private void checkHash(RxpPacket packet) throws IOException {
 		if (packet.payloadLength != 32) 
 			throw new IllegalStateException("checkHash - The length of the packet is incorrect");
 		
 		if (!packet.isAck|packet.isNack|packet.isFin|packet.isSyn)
 			throw new IllegalStateException("checkHash - Illegal packet flags");
+		
+		// Update the acknowledgement
+		ack += packet.payloadLength;
 		
 		// Calculate the hash of the nonce.
 		byte[] hash = hash(nonce);
@@ -570,6 +595,9 @@ public class RxpSocket {
 			// Bad connection attempt, close the connection forcefully
 			onTimedWaitTimeout();
 		}
+		
+		// Send the ack
+		sendAck();
 	}
 
 	/**
@@ -598,6 +626,9 @@ public class RxpSocket {
 	 * @throws IOException 
 	 */
 	private void sendPacket(RxpPacket packet) throws IOException{
+		// Increase the sequence number
+		seq += packet.payloadLength;
+		
 		// Add the packet to the list of unacknowledged packets
 		unacked.addLast(packet);
 		
@@ -606,8 +637,7 @@ public class RxpSocket {
 		socket.send(udpPkt);
 
 		// Start the timer if it isn't running already
-		if (!sendTimeout.isRunning())
-			sendTimeout.start();
+		if (!sendTimeout.isRunning()) sendTimeout.start();
 	}
 
 	/**
@@ -743,7 +773,6 @@ public class RxpSocket {
 				if (length == MAXIMUM_PAYLOAD_SIZE){
 					RxpPacket packet = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.ACK, buffer);
 					sendPacket(packet);
-					seq += length;
 					length = 0;
 				} else{
 					// Wait to see if more bytes arrive
@@ -768,10 +797,9 @@ public class RxpSocket {
 					sendPacket(packet);
 				} catch (IOException e) {
 				}
-				
-				// Increase the sequence number
-				seq += payload.length;
 			}
 		}
 	}
+
+	
 }
