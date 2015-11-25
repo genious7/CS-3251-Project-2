@@ -62,13 +62,16 @@ public class RxpServerSocket {
 	}
 	
 	public void close() throws IOException{
-		// Close all the sockets
-		for (RxpSocket rxpSocket : connections.values()) {
-			rxpSocket.close();
-		}
+		// Close all the sockets in parallel, since close is blocking
+		connections.values().parallelStream().forEach(i -> {
+			try {
+				i.close();
+			} catch (Exception e) {
+			}
+		});
 		
-		// Don't close the socket here. If the socket is closed, the server
-		// won't be able to gracefully close the connections with the client.
+		// Close the socket
+		udpSocket.close();
 	}
 	
 	private void readPacket(){
@@ -92,9 +95,13 @@ public class RxpServerSocket {
 					// connection
 					rxpSocket.rcvPacket(rxpPacket);
 					
-					// If there is an error, get rid of the socket forcefully.
 					if (rxpSocket.hasException()) {
+						// If there is an error, get rid of the socket forcefully.
 						connections.remove(key);
+						
+						// Note that the server application may have not
+						// formally accepted the connection, so remove it too.
+						unaccepted.remove(rxpSocket);
 					}
 				} else {
 					// The packet is for a new connection. If it is not a SYN
@@ -102,7 +109,11 @@ public class RxpServerSocket {
 					if (rxpPacket.isCorrupt() || !rxpPacket.isSyn) continue;
 					
 					// Create a new connection
-					RxpSocket rxpSocket = new RxpSocket(rxpSrcPort, rxpPacket.sourcePort, packet.getSocketAddress(), udpSocket, () -> {connections.remove(key);System.out.println("Finished gracefully");;});
+					RxpSocket rxpSocket = new RxpSocket(rxpSrcPort, rxpPacket.sourcePort, packet.getSocketAddress(),
+							udpSocket, () -> {
+								connections.remove(key);
+								System.out.println("Finished gracefully");
+							});
 					rxpSocket.rcvPacket(rxpPacket);
 					
 					connections.put(key, rxpSocket);

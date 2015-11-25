@@ -681,7 +681,9 @@ public class RxpSocket {
 				synchronized (lock) {
 					lock.notifyAll();
 				}
-			} else if (state == States.FIN_WAIT_1) state = States.FIN_WAIT_2;
+			} else if (state == States.FIN_WAIT_1 & !packet.isFin){
+				state = States.FIN_WAIT_2;
+			}
 		}
 	}
 	
@@ -691,35 +693,59 @@ public class RxpSocket {
 	 * @throws IOException If the acknowledgement cannot be sent.
 	 */
 	private void handleFin(RxpPacket packet) throws IOException{
-		// Fin's should not have any other flag set
-		if (packet.isAck||packet.isSyn||!packet.isFin||packet.isNack)
-			throw new IllegalStateException("rcvFin - FIN packets should not have other flags set");
 		
 		// Check that the payload length is correct
 		if (packet.payloadLength != 1)
 			throw new IllegalStateException("rcvFin - FIN packets must have a length of one");
 		
-		// Send the acknowledgement
+		// Update the acknowledgement number
 		ack += packet.payloadLength;
-		sendAck();
 		
-		// Change the state if applicable. Since duplicate packets have already
-		// been removed when this method is called, an invalid FIN will throw an
-		// exception.
-		if (state == States.FIN_WAIT_1) state = States.CLOSING;
-		else if (state == States.FIN_WAIT_2){
-			state = States.TIMED_WAIT;
-			timedWaitTimeout.start();
-		}
-		else if (state == States.ESTABLISHED){ 
+		switch (state) {
+		case ESTABLISHED:
+			// Fin's in Established should not have any other flag set
+			if (packet.isAck||packet.isSyn||!packet.isFin||packet.isNack)
+				throw new IllegalStateException("rcvFin - FIN packets should not have other flags set");
+			
 			// Change the state to last ACK
 			state = States.LAST_ACK;
 			
-			// This implementation does not support half open connections. Close the other end
-			RxpPacket finPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.FIN, new byte[]{0});
-			sendPacket(finPkt);		
+			// This implementation does not support half open connections. Close
+			// the other end
+			RxpPacket finPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(),
+					(short) (RxpPacket.FIN | RxpPacket.ACK), new byte[] { 0 });
+			sendPacket(finPkt);
+			break;
+		case FIN_WAIT_1:
+			// Fin's in Established should not have any other flag set
+			if (packet.isSyn || !packet.isFin || packet.isNack)
+				throw new IllegalStateException("rcvFin - FIN-ACK packets should not have other flags set");
+
+			if (packet.isAck) {
+				state = States.TIMED_WAIT;
+				timedWaitTimeout.start();
+			}else{
+				state = States.CLOSING;
+			}			
+
+			// Send the acknowledgement
+			sendAck();
+			break;
+		case FIN_WAIT_2:
+			// Fin's in Established should not have any other flag set
+			if (packet.isAck || packet.isSyn || !packet.isFin || packet.isNack)
+				throw new IllegalStateException("rcvFin - FIN packets should not have other flags set");
+
+			// Change the state to CLOSING
+			state = States.TIMED_WAIT;
+
+			// Send the acknowledgement
+			sendAck();
+			timedWaitTimeout.start();
+			break;
+		default:
+			throw new IllegalStateException("rcvFin - ???");
 		}
-		else throw new IllegalStateException("rcvFin - ???");
 	}
 	
 	/**
@@ -970,7 +996,7 @@ public class RxpSocket {
 		synchronized (retryCounter) {
 			retryCounter++;
 			if (retryCounter >= MAX_RETRIES) {
-				setException(new IOException("The connection has been lost"));
+				setException(new IOException("The connection has been lost during state: "+ state));
 			}
 		}
 		
