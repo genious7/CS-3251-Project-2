@@ -9,10 +9,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 
 public class RxpServerSocket {
-	/** The udp server socket*/
+	/** The UDP server socket*/
 	private DatagramSocket udpSocket;
 	
-	/** The Rxp server socket port number*/
+	/** The RxP server socket port number*/
 	private short rxpSrcPort;
 	
 	/** A list of unaccepted connections*/
@@ -24,10 +24,14 @@ public class RxpServerSocket {
 	/** A thread responsible for reading all the packets from the UDP port*/
 	private final Thread packetReader;
 	
+	/** True if this {@link RxpServerSocket} is closed, false otherwise*/
+	private boolean isClosed;
+	
 	public RxpServerSocket() {
 		connections = new ConcurrentHashMap<>();
 		unaccepted = new LinkedBlockingQueue<>();
 		packetReader = new Thread(() -> readPacket());
+		isClosed = true;
 	}
 	
 	public void listen(int udpPort, int rxpPort) throws SocketException{
@@ -35,6 +39,7 @@ public class RxpServerSocket {
 	}
 	
 	public void listen(int udpPort, short rxpPort) throws SocketException{
+		isClosed = false;
 		udpSocket = new DatagramSocket(udpPort);
 		rxpSrcPort = rxpPort;
 		packetReader.start();
@@ -72,7 +77,7 @@ public class RxpServerSocket {
 		DatagramPacket packet = new DatagramPacket(rcvd, RxpSocket.MAXIMUM_SEGMENT_SIZE);
 		
 		try {
-			while (true) {
+			while (!isClosed) {
 				// Receive a packet
 				udpSocket.receive(packet);
 
@@ -82,16 +87,22 @@ public class RxpServerSocket {
 
 				// Determine if the packet belongs to an existing connection
 				if (connections.containsKey(key)) {
+					RxpSocket rxpSocket = connections.get(key);
 					// Existing connection, just send the packet to the
 					// connection
-					connections.get(key).rcvPacket(rxpPacket);
+					rxpSocket.rcvPacket(rxpPacket);
+					
+					// If there is an error, get rid of the socket forcefully.
+					if (rxpSocket.hasException()) {
+						connections.remove(key);
+					}
 				} else {
 					// The packet is for a new connection. If it is not a SYN
 					// packet, discard it.
 					if (rxpPacket.isCorrupt() || !rxpPacket.isSyn) continue;
 					
 					// Create a new connection
-					RxpSocket rxpSocket = new RxpSocket(rxpSrcPort, rxpPacket.sourcePort, packet.getSocketAddress(), udpSocket, () -> connections.remove(key));
+					RxpSocket rxpSocket = new RxpSocket(rxpSrcPort, rxpPacket.sourcePort, packet.getSocketAddress(), udpSocket, () -> {connections.remove(key);System.out.println("Finished gracefully");;});
 					rxpSocket.rcvPacket(rxpPacket);
 					
 					connections.put(key, rxpSocket);

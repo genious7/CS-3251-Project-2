@@ -35,6 +35,11 @@ public class RxpSocket {
 		
 		@Override
 		public int read() throws IOException {
+			// If an exception has occurred somewhere else, throw it here as well.
+			synchronized (eLock) {
+				if (exception != null) throw new IOException(exception);
+			}
+			
 			// If the buffer is empty, return -1
 			if (winLength == 0) return -1;
 			
@@ -55,6 +60,12 @@ public class RxpSocket {
 		
 		@Override
 		public int read(byte[] b, int off, int len) throws IOException {
+			// If an exception has occurred somewhere else, throw it here as
+			// well.
+			synchronized (eLock) {
+				if (exception != null) throw new IOException(exception);
+			}
+
 			// If the buffer is empty, return -1
 			if (winLength == 0) return -1;
 			
@@ -104,7 +115,11 @@ public class RxpSocket {
 		 */		
 		private Timer streamTimer;
 		
-		public SendStream() {
+		/**
+		 * Creates a new stream to get the bytes that need to be sent to the
+		 * client
+		 */
+		private SendStream() {
 			streamTimer = new Timer(TIMEOUT_SEND_STREAM, e -> sendShortPacket());
 			streamTimer.setInitialDelay(TIMEOUT_SEND_STREAM);
 			streamTimer.setRepeats(false);
@@ -115,9 +130,15 @@ public class RxpSocket {
 		
 		@Override
 		public void write(int b) throws IOException {
+			// If an exception has occurred somewhere else, throw it here as
+			// well.
+			synchronized (eLock) {
+				if (exception != null) throw new IOException(exception);
+			}
+
 			if (state != States.ESTABLISHED)
 				throw new IllegalStateException("Data can only be sent when the connection has been established");
-			
+
 			// Save the byte
 			synchronized (this) {
 				buffer[length] = (byte) b;
@@ -171,6 +192,12 @@ public class RxpSocket {
 	}  
 	
 	/**
+	 * The maximum number of consecutive retries that can occur before the
+	 * socket determines that the connection has been lost.
+	 */
+	private static final int MAX_RETRIES = 5;
+	
+	/**
 	 * The timeout before considering unacknowledged packets lost, in
 	 * milliseconds
 	 */
@@ -195,6 +222,9 @@ public class RxpSocket {
 	private SocketAddress destUdpAddress;
 	
 	private DatagramSocket srcSocket;
+	
+	/** Counts the number of times a packet has been resent*/
+	private Integer retryCounter;
 	
 	/** The input stream that returns received data*/
 	private final InputStream iStream;
@@ -227,7 +257,7 @@ public class RxpSocket {
 	/** The head of the receive window*/
 	private short winHead;
 		
-		/** The length of the occupied receive window*/
+	/** The length of the occupied receive window*/
 	private short winLength, destWinLength;
 	
 	/** The total length of the receive window*/
@@ -255,7 +285,10 @@ public class RxpSocket {
 	private final Random randGenerator;
 	
 	/** A lock used to create blocking methods*/
-	private final Object lock;
+	private final Object lock, eLock;
+	
+	/** Used to pass exceptions between threads*/
+	private IOException exception;
 	
 	/**
 	 * Creates a new, unconnected {@link RxpSocket}.
@@ -290,6 +323,11 @@ public class RxpSocket {
 		
 		// Generate the thread lock
 		lock = new Object();
+		eLock = new Object();
+		exception = null;
+		
+		// Start the retry counter at zero
+		retryCounter = 0;
 	}
 	
 	/**
@@ -327,16 +365,48 @@ public class RxpSocket {
 	 * @throws IOException
 	 */
 	public void close() throws IOException{
-		// If the connection is not in the established state, throw an error.
-		if (state != States.ESTABLISHED && state != States.CLOSE_WAIT) 
+		if (state == States.LAST_ACK) {
+			// If the connection is in LAST_ACK, the other endpoint initiated
+			// the close first. Do nothing
+		} else if (state == States.ESTABLISHED) {
+			// Update the state
+			state = States.FIN_WAIT_1;
+
+			// Send the FIN packet
+			RxpPacket finPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.FIN,
+					new byte[] { 0 });
+			sendPacket(finPkt);
+		} else if (state == States.CLOSE_WAIT) {
+			// Update the state
+			state = States.LAST_ACK;
+
+			// Send the FIN packet
+			RxpPacket finPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.FIN,
+					new byte[] { 0 });
+			sendPacket(finPkt);
+		} else {
+			// If the connection is not in the established state, throw an
+			// error.
 			throw new IllegalStateException("The socket must be established before it can be closed");
+		}
 		
-		// Update the state
-		state = States.FIN_WAIT_1;
-		
-		// Send the FIN packet		
-		RxpPacket finPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.FIN, new byte[]{0});
-		sendPacket(finPkt);
+		// Wait until the connection is closed before returning
+		synchronized (lock) {
+			while (state != States.CLOSED) {	
+				try {
+					lock.wait();
+				} catch (InterruptedException e) {
+					// Nothing should interrupt this thread, so pass the
+					// exception up to the main thread
+					throw new RuntimeException(e);
+				}
+
+				// Check that an error did not occur while attempting to close
+				synchronized (eLock) {
+					if (exception != null) throw new IOException(exception);
+				}
+			}
+		}
 	}
 	
 	/**
@@ -409,8 +479,10 @@ public class RxpSocket {
 					RxpPacket parsedPacket = new RxpPacket(rcvd);
 					rcvPacket(parsedPacket);
 				} catch (IOException e) {
-					continue; // If an error occurs while reading the packet,
-								// just drop the packet.
+					// If an error occurs while reading the packet, pass it to the main thread
+					synchronized (eLock) {
+						exception = e;
+					} 
 				}
 			}
 		});
@@ -420,13 +492,21 @@ public class RxpSocket {
 		RxpPacket synPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.SYN, new byte[]{0});
 		sendPacket(synPkt);
 		
+		// Wait until the connection is established before returning
 		synchronized (lock) {
-			// Wait until the connection is established before returning
-			try {
-				while (state != States.ESTABLISHED) {
+			while (state != States.ESTABLISHED) {	
+				try {
 					lock.wait();
+				} catch (InterruptedException e) {
+					// Nothing should interrupt this thread, so pass the
+					// exception up to the main thread
+					throw new RuntimeException(e);
 				}
-			} catch (InterruptedException e) {
+
+				// Check that an error did not occur while attempting to connect
+				synchronized (eLock) {
+					if (exception != null) throw new IOException(exception);
+				}
 			}
 		}		
 	}
@@ -534,11 +614,9 @@ public class RxpSocket {
 	 * Handle the acknowledgement packet.
 	 * @param packet
 	 */
-	private void handleAck(RxpPacket packet){
+	private void handleAck(RxpPacket packet) throws IOException{
 		// If the latest acknowledgement packet is valid, do nothing.
 		if (lastAck == packet.ack) return;
-		
-		//TODO: Check that ACK makes sense using the lastAck and the number of packets in flight
 		
 		// Boolean to check if the timer should be reset
 		boolean hasChanged = false;
@@ -559,6 +637,11 @@ public class RxpSocket {
 		if (hasChanged){
 			// Packets have been acknowledged, update the queues
 			processQueues();
+			
+			// Reset the retry counter
+			synchronized (retryCounter) {
+				retryCounter = 0;
+			}
 			
 			// Resets the send timeout timer
 			if (unacked.isEmpty()){
@@ -584,8 +667,16 @@ public class RxpSocket {
 					lock.notifyAll();
 				}
 			} else if (state == States.CLOSING) state = States.TIMED_WAIT;
-			else if (state == States.LAST_ACK) state = States.CLOSED;
-			else if (state == States.FIN_WAIT_1) state = States.FIN_WAIT_2;
+			else if (state == States.LAST_ACK) {
+				timedWaitTimeout.stop();
+				sendTimeout.stop();
+				state = States.CLOSED;
+				
+				// Return from the close() method
+				synchronized (lock) {
+					lock.notifyAll();
+				}
+			} else if (state == States.FIN_WAIT_1) state = States.FIN_WAIT_2;
 		}
 	}
 	
@@ -612,7 +703,14 @@ public class RxpSocket {
 		// exception.
 		if (state == States.FIN_WAIT_1) state = States.CLOSING;
 		else if (state == States.FIN_WAIT_2) state = States.TIMED_WAIT;
-		else if (state == States.ESTABLISHED) state = States.CLOSE_WAIT;
+		else if (state == States.ESTABLISHED){ 
+			// Change the state to last ACK
+			state = States.LAST_ACK;
+			
+			// This implementation does not support half open connections. Close the other end
+			RxpPacket finPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.FIN, new byte[]{0});
+			sendPacket(finPkt);		
+		}
 		else throw new IllegalStateException("rcvFin - ???");
 	}
 	
@@ -636,6 +734,19 @@ public class RxpSocket {
 	}
 	
 	/**
+	 * Find out if the socket has crashed
+	 * @return
+	 */
+	protected boolean hasException(){
+		synchronized (eLock) {
+			//FIXME
+			if (exception != null)
+				exception.printStackTrace();
+			return exception != null;
+		}
+	}
+	
+	/**
 	 * Gets the SHA256 of the input bytes
 	 * @param nonce The nonce used during the handshake
 	 * @return The hash, as a byte array.
@@ -649,7 +760,7 @@ public class RxpSocket {
 			hasher.update(nonce);
 			hash = hasher.digest();	
 		} catch (NoSuchAlgorithmException e) {
-			throw new UnsupportedOperationException(e);
+			throw new RuntimeException(e);
 		}
 		
 		return hash;
@@ -665,10 +776,47 @@ public class RxpSocket {
 		
 		// Set the state to closed
 		state = States.CLOSED;
+		
+		// Return from the close() method
+		synchronized (lock) {
+			lock.notifyAll();
+		}
 
 		// Close the socket. This will cause the termination of the
-		// packetReceiver Thread
+		// packetReceiver Thread on the client. On the server, it will remove
+		// the connection from the list of active connections
 		onClose.run();
+	}
+
+	/**
+	 * Checks how many packets are currently unaccounted. If the amount of
+	 * packets "in the air" is less than the maximum supported by the other end
+	 * point, send additional packets.
+	 */
+	private void processQueues() throws IOException{
+		short winSize = getAvailWindow();
+		
+		// Note that the construction of the loop condition ensures that there
+		// is always at least one packet in the network.
+		while ((Integer.compareUnsigned(unacked.size() * MAXIMUM_PAYLOAD_SIZE, destWinLength) < 0 || unacked.isEmpty())
+				&& !queuedPackets.isEmpty()) {
+			RxpPacket nextPacket = queuedPackets.remove();
+
+			// Update the packet flags
+			nextPacket.setAck(ack);
+			nextPacket.setWindowSize(winSize);
+			
+			// Send the packet
+			DatagramPacket udpPkt = new DatagramPacket(nextPacket.asByteArray(), nextPacket.getTotalLength(), destUdpAddress);
+			srcSocket.send(udpPkt);
+			
+			
+			// Add the packet to the list of unacknowledged packets
+			unacked.addLast(nextPacket);
+		}
+
+		// Start the timer if it isn't running already and if there are packets on the network.
+		if (!sendTimeout.isRunning() && !unacked.isEmpty()) sendTimeout.start();
 	}
 
 	/**
@@ -769,7 +917,7 @@ public class RxpSocket {
 		DatagramPacket packet = new DatagramPacket(nack.asByteArray(), nack.getTotalLength(), destUdpAddress);
 		srcSocket.send(packet);
 	}
-
+	
 	/**
 	 * Sends the packet to the other endpoint.
 	 * @param packet
@@ -788,40 +936,6 @@ public class RxpSocket {
 	}
 	
 	/**
-	 * Checks how many packets are currently unaccounted. If the amount of
-	 * packets "in the air" is less than the maximum supported by the other end
-	 * point, send additional packets.
-	 */
-	private void processQueues(){
-		short winSize = getAvailWindow();
-		
-		// Note that the construction of the loop condition ensures that there
-		// is always at least one packet in the network.
-		while ((Integer.compareUnsigned(unacked.size() * MAXIMUM_PAYLOAD_SIZE, destWinLength) < 0 || unacked.isEmpty())
-				&& !queuedPackets.isEmpty()) {
-			RxpPacket nextPacket = queuedPackets.remove();
-
-			// Update the packet flags
-			nextPacket.setAck(ack);
-			nextPacket.setWindowSize(winSize);
-			
-			// Send the packet
-			DatagramPacket udpPkt = new DatagramPacket(nextPacket.asByteArray(), nextPacket.getTotalLength(), destUdpAddress);
-			try {
-				srcSocket.send(udpPkt);
-			} catch (IOException e) {
-				e.printStackTrace();
-			}
-			
-			// Add the packet to the list of unacknowledged packets
-			unacked.addLast(nextPacket);
-		}
-
-		// Start the timer if it isn't running already and if there are packets on the network.
-		if (!sendTimeout.isRunning() && !unacked.isEmpty()) sendTimeout.start();
-	}
-	
-	/**
 	 * Called every time a timeout occurs; must resend all packets in the send window
 	 */
 	private void sendTimeout(){
@@ -832,17 +946,52 @@ public class RxpSocket {
 		short winSize = getAvailWindow();
 		
 		// Note that the amount of packets in the unacked queue should not
-		// exceed the receiver buffer - see processQueue.
+		// exceed the receiver buffer - see processQueue for proof.
 		for (RxpPacket rxpPacket : unacked) {
 			rxpPacket.setAck(ack);
 			rxpPacket.setWindowSize(winSize);
 			DatagramPacket udpPkt = new DatagramPacket(rxpPacket.asByteArray(), rxpPacket.getTotalLength(), destUdpAddress);
 			try {
 				srcSocket.send(udpPkt);
-			} catch (IOException e) {}
+			} catch (IOException e) {
+				setException(e);
+			}
 		}
+		
+		// Check if this is the n'th timeout
+		synchronized (retryCounter) {
+			retryCounter++;
+			if (retryCounter >= MAX_RETRIES) {
+				setException(new IOException("The connection has been lost"));
+			}
+		}
+		
 	}
 
+	/**
+	 * Passes an exception to the main thread
+	 * @param e The original exception
+	 */
+	private void setException(IOException e){		
+		// Force close the socket
+		state = States.CLOSED;
+		
+		// Stop all timers
+		timedWaitTimeout.stop();
+		sendTimeout.stop();
+		
+		// Pass the exception to the main thread
+		synchronized (eLock) {
+			exception = e;
+		}
+		
+		// If the main thread is in the connect or close method waiting for
+		// completition, unlock it.
+		synchronized (lock) {
+			lock.notifyAll();
+		}
+	}
+	
 	/**
 	 * Sends a random four byte nonce to the client.
 	 * @param packet The SYN packet sent by the client
@@ -854,7 +1003,8 @@ public class RxpSocket {
 			throw new IllegalStateException("rcvNonce - The packet received has invalid flags");
 		
 		// Check that the payload length is correct
-		if (packet.payloadLength != 1) throw new IllegalStateException("rcvNonce - The payload length is incorrect ");
+		if (packet.payloadLength != 1) 
+			throw new IllegalStateException("rcvNonce - The payload length is incorrect ");
 		
 		// At this point, the packet is validated. Initialize the acknowledgement value.
 		ack = packet.seq + packet.payloadLength;
@@ -877,72 +1027,76 @@ public class RxpSocket {
 	 * @param packet The {@link RxpPacket} received by this endpoint
 	 * @throws IOException If a reply cannot be sent successfully
 	 */
-	protected void rcvPacket(RxpPacket packet) throws IOException {	
-		// If the packet is corrupted, it should be dropped.
-		// A NACK should be sent to the other endpoint.
-		if (packet.isCorrupt()) {
-			sendNack();
-			System.err.println("Corrupted packet received");
-			return;
-		}
-
-		// If the packet should is not addressed to the current port, drop it.
-		if (packet.destPort != rxpSrcPort) return;
-		
-		// If the packet is aimed at this client and it is not corrupted, update
-		// the field that remembers the destination's available receive window.
-		// Note that this field will always equal the last received packet; this
-		// is intentional.
-		destWinLength = packet.windowSize;
-		
-		// If the packet has the acknowledgement flag, update the receive
-		// buffer. Note that state changes caused by ACK packets are handled
-		// internally.
-		if (packet.isAck) handleAck(packet);
-		
-		// If the packet is a NACK, resend all unacked packets.
-		if (packet.isNack){
-			sendTimeout.restart();
-			sendTimeout();
-		}
-		
-		// If the packet carries some data (or a flag), discard it if it has
-		// already been acknowledged and resend the acknowledgement. This line
-		// handles duplicate packages.
-		if ((packet.isSyn || packet.isFin || packet.payloadLength > 0)
-				&& (ack - (packet.seq + packet.payloadLength - 1) > 0)
-				&& (state != States.LISTEN && state != States.SYN_SENT)) {
-			sendAck();
-			return;
-		}
-		
-		// If the packet is a FIN packet, handle it. Note that this function
-		// assumes that all duplicate packets have been removed.
-		if (packet.isFin){
-			handleFin(packet);
-			if (state == States.TIMED_WAIT)
-				timedWaitTimeout.start();
-			return;
-		}
-		
-		// If the packet is a SYN packet, handle it. Note that this function
-		// assumes that duplicate packets have been removed.
-		if (packet.isSyn){
-			handleSyn(packet);
-			return;
-		}
-		
-		// If the server is receiving the hash in the SYN_RECEIVED state, handle
-		// that case here.
-		if (state == States.SYN_RECEIVED && packet.payloadLength > 0){
-			checkHash(packet);
-			return;
-		}
-		
-		// If the packet has a non zero payload and it is not a SYN or FIN
-		// packet, process the data here.
-		if (state == States.ESTABLISHED && packet.payloadLength > 0){
-			rcvData(packet);
+	protected void rcvPacket(RxpPacket packet){	
+		try{
+			// If the packet is corrupted, it should be dropped.
+			// A NACK should be sent to the other endpoint.
+			if (packet.isCorrupt()) {
+				sendNack();
+				System.err.println("Corrupted packet received");
+				return;
+			}
+	
+			// If the packet should is not addressed to the current port, drop it.
+			if (packet.destPort != rxpSrcPort) return;
+			
+			// If the packet is aimed at this client and it is not corrupted, update
+			// the field that remembers the destination's available receive window.
+			// Note that this field will always equal the last received packet; this
+			// is intentional.
+			destWinLength = packet.windowSize;
+			
+			// If the packet has the acknowledgement flag, update the receive
+			// buffer. Note that state changes caused by ACK packets are handled
+			// internally.
+			if (packet.isAck) handleAck(packet);
+			
+			// If the packet is a NACK, resend all unacked packets.
+			if (packet.isNack){
+				sendTimeout.restart();
+				sendTimeout();
+			}
+			
+			// If the packet carries some data (or a flag), discard it if it has
+			// already been acknowledged and resend the acknowledgement. This line
+			// handles duplicate packages.
+			if ((packet.isSyn || packet.isFin || packet.payloadLength > 0)
+					&& (ack - (packet.seq + packet.payloadLength - 1) > 0)
+					&& (state != States.LISTEN && state != States.SYN_SENT)) {
+				sendAck();
+				return;
+			}
+			
+			// If the packet is a FIN packet, handle it. Note that this function
+			// assumes that all duplicate packets have been removed.
+			if (packet.isFin){
+				handleFin(packet);
+				if (state == States.TIMED_WAIT)
+					timedWaitTimeout.start();
+				return;
+			}
+			
+			// If the packet is a SYN packet, handle it. Note that this function
+			// assumes that duplicate packets have been removed.
+			if (packet.isSyn){
+				handleSyn(packet);
+				return;
+			}
+			
+			// If the server is receiving the hash in the SYN_RECEIVED state, handle
+			// that case here.
+			if (state == States.SYN_RECEIVED && packet.payloadLength > 0){
+				checkHash(packet);
+				return;
+			}
+			
+			// If the packet has a non zero payload and it is not a SYN or FIN
+			// packet, process the data here.
+			if (state == States.ESTABLISHED && packet.payloadLength > 0){
+				rcvData(packet);
+			}
+		} catch(IOException e){
+			setException(e);
 		}
 	}	
 }
