@@ -285,7 +285,7 @@ public class RxpSocket {
 	private final Random randGenerator;
 	
 	/** A lock used to create blocking methods*/
-	private final Object lock, eLock;
+	private final Object lock, eLock, winLock;
 	
 	/** Used to pass exceptions between threads*/
 	private IOException exception;
@@ -324,6 +324,7 @@ public class RxpSocket {
 		// Generate the thread lock
 		lock = new Object();
 		eLock = new Object();
+		winLock = new Object();
 		exception = null;
 		
 		// Start the retry counter at zero
@@ -531,16 +532,39 @@ public class RxpSocket {
 	 * Sets the size of the receiving buffer.
 	 * @param size The size of the buffer, in shorts.
 	 */
-	public void setBufferSize(short size){
-		// If you try to change the size of an open connection, throw an error.
-		if (state != States.CLOSED)
-			throw new IllegalStateException("Can't change the buffer size of an open connection");
-		
+	public void setBufferSize(short size){	
 		// If the buffer size is less than the segment size, throw an error.
 		if (size < MAXIMUM_PAYLOAD_SIZE)
 			throw new IllegalArgumentException("The buffer size cannot be smaller than the payload size");
 		
-		winTotalLength = size;
+		if (rcvWindow == null){
+			// If the buffer hasn't been allocated yet, changing the total
+			// length field will make it work.
+			winTotalLength = size;
+		}else if (size > winLength){
+			// If the buffer is in use but fits in the new buffer, start by
+			// creating a new buffer.
+			byte newWindow[] = new byte[size];
+			
+			// Assume set buffer size was called from the main thread, only
+			// handleData acts on the window from a distinct thread.
+			synchronized (winLock) {
+				try {
+					// Copy the window to the new buffer
+					iStream.read(newWindow, 0, winLength);
+					
+					// Reset window parameters
+					rcvWindow = newWindow;
+					winHead = 0;
+					winTotalLength = size;
+				} catch (IOException e) {}
+				// Swallow the exception. The exception is already saved in
+				// the field exception and will get rethrown later on.
+			}
+		}else{
+			throw new IllegalStateException(
+					"Can't change the buffer size of a connection while the buffer has data inside");
+		}
 	}
 	
 	/**
@@ -863,32 +887,36 @@ public class RxpSocket {
 		if (packet.payloadLength > getAvailWindow())
 			return;
 		
-		// Calculate the available length
-		int tail;
-		synchronized (iStream) {
-			tail = winHead + winLength;
+		// Do not allow the window size to change during save operations.
+		synchronized (winLock) {
 			
-			// Check if the array is already wrapping around
-			if (tail >= winTotalLength){
-				tail -= winTotalLength;
+			// Calculate the available length
+			int tail;
+			synchronized (iStream) {
+				tail = winHead + winLength;
+				
+				// Check if the array is already wrapping around
+				if (tail >= winTotalLength){
+					tail -= winTotalLength;
+				}
 			}
-		}
-		
-		int spaceAfterTail = winTotalLength - tail;
-		
-		// Copy the payload to the window
-		// No need to synchronize this part since it writes on the tail while
-		// the other thread gets data from the head.
-		if (packet.payloadLength < spaceAfterTail || tail < winHead){
-			System.arraycopy(packet.payload, 0, rcvWindow, tail, packet.payloadLength);
-		} else{
-			System.arraycopy(packet.payload, 0, rcvWindow, tail, spaceAfterTail);
-			System.arraycopy(packet.payload, spaceAfterTail, rcvWindow, 0, packet.payloadLength - spaceAfterTail);
-		}
-		
-		synchronized (iStream) {
-			// Update the window length
-			winLength += packet.payloadLength;
+			
+			int spaceAfterTail = winTotalLength - tail;
+			
+			// Copy the payload to the window
+			// No need to synchronize this part since it writes on the tail while
+			// the other thread gets data from the head.
+			if (packet.payloadLength < spaceAfterTail || tail < winHead){
+				System.arraycopy(packet.payload, 0, rcvWindow, tail, packet.payloadLength);
+			} else{
+				System.arraycopy(packet.payload, 0, rcvWindow, tail, spaceAfterTail);
+				System.arraycopy(packet.payload, spaceAfterTail, rcvWindow, 0, packet.payloadLength - spaceAfterTail);
+			}
+			
+			synchronized (iStream) {
+				// Update the window length
+				winLength += packet.payloadLength;
+			}
 		}
 		
 		// Update the acknowledgement

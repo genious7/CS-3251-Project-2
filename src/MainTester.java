@@ -48,6 +48,9 @@ public class MainTester {
 					System.out.println("Finished Gracefully");
 					scanner.close();
 					return;
+				}else if(line.contains("window")){
+					socket.setWindowSize(2);
+					System.out.println("Changed window size");
 				}else{
 					writer.write(line.getBytes());
 				}				
