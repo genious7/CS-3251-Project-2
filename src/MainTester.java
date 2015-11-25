@@ -20,9 +20,7 @@ public class MainTester {
 			
 			InputStream reader = socket.getInputStream();
 			
-			while (true){
-				int data;
-				
+			while (true){				
 				if (reader.available() > 0){
 					byte buffer[]  = new byte[reader.available()];
 					reader.read(buffer);
@@ -47,6 +45,9 @@ public class MainTester {
 				String line = scanner.nextLine();
 				if (line.contains("close")) {
 					socket.close();
+					System.out.println("Finished Gracefully");
+					scanner.close();
+					return;
 				}else{
 					writer.write(line.getBytes());
 				}				
