@@ -22,13 +22,18 @@ public class MainTester {
 			
 			while (true){
 				int data;
-				if ((data = reader.read()) == -1) try {
-					Thread.sleep(100);
-				} catch (InterruptedException e) {
-					e.printStackTrace();
+				
+				if (reader.available() > 0){
+					byte buffer[]  = new byte[reader.available()];
+					reader.read(buffer);
+					System.out.println(new String(buffer));
+				}else{
+					try {
+						Thread.sleep(100);
+					} catch (InterruptedException e) {
+						e.printStackTrace();
+					}
 				}
-				else
-					System.out.print((char)data);
 			}
 			
 		}else{
@@ -40,7 +45,11 @@ public class MainTester {
 			
 			while (true){
 				String line = scanner.nextLine();
-				writer.write(line.getBytes());
+				if (line.contains("close")) {
+					socket.close();
+				}else{
+					writer.write(line.getBytes());
+				}				
 			}
 		}
 	}
