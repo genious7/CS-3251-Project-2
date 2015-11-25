@@ -666,11 +666,16 @@ public class RxpSocket {
 				synchronized (lock) {
 					lock.notifyAll();
 				}
-			} else if (state == States.CLOSING) state = States.TIMED_WAIT;
+			} else if (state == States.CLOSING) {
+				state = States.TIMED_WAIT;
+				timedWaitTimeout.start();
+			}
 			else if (state == States.LAST_ACK) {
 				timedWaitTimeout.stop();
 				sendTimeout.stop();
 				state = States.CLOSED;
+				
+				onClose.run();
 				
 				// Return from the close() method
 				synchronized (lock) {
@@ -702,7 +707,10 @@ public class RxpSocket {
 		// been removed when this method is called, an invalid FIN will throw an
 		// exception.
 		if (state == States.FIN_WAIT_1) state = States.CLOSING;
-		else if (state == States.FIN_WAIT_2) state = States.TIMED_WAIT;
+		else if (state == States.FIN_WAIT_2){
+			state = States.TIMED_WAIT;
+			timedWaitTimeout.start();
+		}
 		else if (state == States.ESTABLISHED){ 
 			// Change the state to last ACK
 			state = States.LAST_ACK;
@@ -1071,8 +1079,6 @@ public class RxpSocket {
 			// assumes that all duplicate packets have been removed.
 			if (packet.isFin){
 				handleFin(packet);
-				if (state == States.TIMED_WAIT)
-					timedWaitTimeout.start();
 				return;
 			}
 			
