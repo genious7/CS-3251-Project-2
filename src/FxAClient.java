@@ -159,23 +159,19 @@ public class FxAClient {
 				// Window size change request
 				
 			} else if (split[0].equals("window")) {
-				if(!connected) {
-					if(split.length>1) { 
-						try {
-				            int windowSize = Integer.parseInt(args[0]);
-				            socket.setWindowSize(windowSize);
-				        } catch (NumberFormatException e) {
-				            System.err.println("Argument " + split[1] + " must be an integer.");
-				            System.exit(1);
-				        }
-					} else {
-						System.out.println("You cannot change the window size of an established connection!");
-					}
-				} else {
+				if(split.length>1) { 
+					try {
+				        int windowSize = Integer.parseInt(args[0]);
+				        socket.setWindowSize(windowSize);
+				    } catch (NumberFormatException e) {
+				        System.err.println("Argument " + split[1] + " must be an integer.");
+				        System.exit(1);
+				    }
+				}  else {
 					System.out.println("Window requires a second input!");
 				}
 			} else {
-				writer.write(input.getBytes());
+				writer.write(input.getBytes()); // TODO change this to invalid input
 			}
 
 			//String line = scan.nextLine();
