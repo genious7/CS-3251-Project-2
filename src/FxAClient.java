@@ -1,188 +1,170 @@
-import java.io.BufferedWriter;
 import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
+import java.net.SocketException;
 import java.util.Scanner;
-import java.util.ArrayList;
+
+import java.nio.ByteBuffer;
 import java.nio.file.*;
 
 public class FxAClient {
-
-	private static RxpServerSocket serverSocket;
-	private static RxpSocket socket;
-
 	
-	public static void main(String[] args) throws Exception {
+	public static void main(String[] args) throws IOException {
+		final int serverUdpPort;
+		final int netEmuUdpPort;
+		final InetSocketAddress netIP;
 		
-		int port = 0;
-		InetAddress netIP = null;
-		int netPort = 0;
-		boolean connected = false;
 		//Check if there are enough command line arguments and make sure they are valid
-		
 		if (args.length != 3){
 			throw new IllegalArgumentException("FxA may only take in exactly 3 inputs: Port, NetEmu IP, NetEmu Port.");
 		}
-		
-		//Parse the port and netemu port inputs
-		
+				
 		try {
-            port = Integer.parseInt(args[0]);
-            netPort = Integer.parseInt(args[2]);
+			//Parse the port and netemu port inputs
+            serverUdpPort = Integer.parseInt(args[0]);
+            netEmuUdpPort = Integer.parseInt(args[2]);
         } catch (NumberFormatException e) {
             System.err.println("Arguments " + args[0] + " and " + args[2] +  " must be integers.");
-            System.exit(1);
+            return;
         }
+		
 		//Convert the string IP input into a valid IP address
-		try {
-			netIP = InetAddress.getByName(args[1]);
-		} catch (UnknownHostException e) {
-			System.err.println(e);
-		}
+		netIP = new InetSocketAddress(args[1], netEmuUdpPort);
+
+		// Create a new RxpSocket and get the corresponding input and output
+		// streams
+		final RxpSocket socket = new RxpSocket();
+		final OutputStream writer = socket.getOutputStream();
+		final InputStream reader = socket.getInputStream();
+		
+		boolean connected = false;
 		
 		Scanner scan = new Scanner(System.in);
-		socket = new RxpSocket();
-		OutputStream writer = socket.getOutputStream();
-		
-		while (true){
-			
-			//Split the command via a space delimiter
-			
-			String input = scan.nextLine();
-			String [] split = input.split("\\s+");
-			
-			//Connect request
-			
-			if(split[0].equals("connect")) {
-				if(!connected) {
-					socket.connect(new InetSocketAddress(netIP, netPort), 2300, port);
-					writer = socket.getOutputStream();
-					connected = true;
-				} else {
-					System.out.println("You are already connected!");
-				}
-				
-				//Put request
-				
-			} else if(split[0].equals("put")) {
-				if(connected){
-					if(split.length>1) {
-						String fileName = split[1];
-						String filePath = System.getProperty("user.dir") + "\\" + fileName;
-						System.out.println(filePath);
-						byte[] file = getFileBytes(filePath);
-						
-						//writer.write("Putting:x".getBytes());
-						//writer.write(fileName.getBytes());
-						writer.write(file);
-					} else {
-						System.out.println("Put requires a second input!");
-					}
-				} else {
-					System.out.println("You must be connected to put!");
-				}
-				
-				//Get request
-				
-			} else if(split[0].equals("get")) {
-				if(connected) {
-					if(split.length>1) { 
-						int count = 0;
-						String fileName = split[1];
-						String getRequest = "get:" + fileName; 	
-						writer.write(getRequest.getBytes());
-						InputStream reader = socket.getInputStream();
-						String getResults = "";
-						
-						//Receive the file that was get requested and store it in a string to be saved to file.
-						
-						while (true){				
-							if (reader.available() > 0){
-								byte buffer[]  = new byte[reader.available()];
-								reader.read(buffer);
-								
-								getResults+=(new String(buffer));
-								
-								System.out.println(new String(buffer));
-								
-							} else {
-								try {
-									count++;
-									Thread.sleep(100);
-									if(count > 10) {
-										break;
-									}
-								} catch (InterruptedException e) {
-									e.printStackTrace();
-								}
-							}
-						}
-						
-						File file = new File(System.getProperty("user.dir") + "\\" + fileName);
-	
-						// Create the file if it doesn't exist.
-						
-						if (!file.exists()) {
-							file.createNewFile();
-						}
-						//Save to a file using filewriter and bufferedwriter.
-						
-						FileWriter fw = new FileWriter(file.getAbsoluteFile());
-						BufferedWriter bw = new BufferedWriter(fw);
-						bw.write(getResults);
-						bw.close();
-						
-					} else {
-						System.out.println("Get requires a second input!");
-					}
-				} else {
-					System.out.println("You must be connected to get!");
-				}
-				
-				// Close request
-				
-			} else if (split[0].equals("close")) {
-				if(connected) {
-					socket.close();
-					System.out.println("Finished Gracefully");
-					scan.close();
-					return;
-				} else {
-					System.out.println("You are not connected!");
-				}
-				
-				// Window size change request
-				
-			} else if (split[0].equals("window")) {
-				if(!connected) {
-					if(split.length>1) { 
-						try {
-				            int windowSize = Integer.parseInt(args[0]);
-				            socket.setWindowSize(windowSize);
-				        } catch (NumberFormatException e) {
-				            System.err.println("Argument " + split[1] + " must be an integer.");
-				            System.exit(1);
-				        }
-					} else {
-						System.out.println("You cannot change the window size of an established connection!");
-					}
-				} else {
-					System.out.println("Window requires a second input!");
-				}
-			} else {
-				writer.write(input.getBytes());
-			}
+		try {
+			while (true) {
+				// Split the input into the command and the arguments
+				String input = scan.nextLine();
+				String[] split = input.split("\\s+", 2);
 
-			//String line = scan.nextLine();
-			//writer.write(line.getBytes());
-			
-			
-		}	
+				// Check that there is a command
+				if (split.length == 0) continue;
+				
+				// Check that the port is still open
+				if (socket.isClosed() && connected) break;
+
+				switch (split[0]) {
+				case "connect":
+					if (!connected) {
+						socket.connect(netIP, 2300, serverUdpPort);
+						connected = true;
+					} else {
+						System.err.println("You are already connected");
+					}
+					break;
+				case "disconnect":
+					if (connected) {
+						socket.close();
+						scan.close();
+					}
+					System.out.println("Socket closed. Terminating program");
+					return;
+				case "get":
+					if (connected && split.length > 1) {
+						String fileName = split[1];
+
+						// Send null terminated get command.
+						String getRequest = "get:" + fileName + "\0";
+						writer.write(getRequest.getBytes());
+						
+						// Receive the length of the file as and parse it into
+						// an int.
+						byte fileSizeTmp[] = new byte[4];
+						readNBytes(reader, fileSizeTmp);
+						ByteBuffer tmp = ByteBuffer.wrap(fileSizeTmp);
+						int fileSize = tmp.getInt();
+
+						// Create the destination byte array
+						byte fileContent[] = new byte[fileSize];
+						readNBytes(reader, fileContent);
+
+						// Write the file
+						File file = new File(fileName + ".bak");
+						Files.write(file.toPath(), fileContent, StandardOpenOption.CREATE);
+					} else if (split.length == 1) {
+						System.out.println("Get requires a second input!");
+					} else {
+						System.out.println("You must be connected to get!");
+					}
+					break;
+				case "put":
+					if (connected && split.length == 2) {
+						File inputFile = new File(split[1]);
+						byte fileContent[] = Files.readAllBytes(inputFile.toPath());
+
+						// Send the null terminated put command
+						String putRequest = "put:" + split[1] + "\0";
+						writer.write(putRequest.getBytes());
+
+						// Send the file length
+						byte[] lengthTmp = new byte[4];
+						ByteBuffer buffer = ByteBuffer.wrap(lengthTmp);
+						buffer.putInt(fileContent.length);
+						writer.write(lengthTmp);
+
+						// Send the file
+						writer.write(fileContent);
+					} else if (split.length == 1) {
+						System.err.println("Put requires a second input!");
+					} else {
+						System.err.println("You must be connected to put a file into the server!");
+					}
+					break;
+				case "window":
+					if (split.length == 2) {
+						try {
+							socket.setWindowSize(Integer.parseInt(split[1]));
+						} catch (NumberFormatException e) {
+							System.err.println("The argument " + split[1] + " must be an integer.");
+						} catch (IllegalStateException e) {
+							System.err.println("The window size cannot be reduced since it is currently in use");
+						}
+					} else {
+						System.err.println("Window requires a second input!");
+					}
+					break;
+				default:
+					System.err.println("Command not recognized");
+					break;
+				}
+			}	
+		} catch (SocketException e) {
+		}
+		System.out.println("Terminated Gracefully");
+	}
+	
+	/**
+	 * Reads bytes until the provided byte array is full.
+	 * 
+	 * @param in
+	 *            The source input stream
+	 * @param array
+	 *            The destination array
+	 * @throws IOException
+	 *             if the input stream cannot be read
+	 */
+	private static void readNBytes(InputStream in, byte[] array) throws IOException{
+		int offset = 0;
+		while (offset < array.length){
+			if (in.available() > 0){
+				offset += in.read(array, offset, array.length - offset);
+			} else{
+				try {
+					Thread.sleep(100);
+				} catch (InterruptedException e) {}
+			}
+		}
 	}
 	
 	/**
@@ -197,7 +179,6 @@ public class FxAClient {
 	 * @throws IOException
 	 * 				If the file could not be read from.
 	 */
-	
 	public static byte [] getFileBytes(String pathName){
 		Path path = Paths.get(pathName);
 		byte[] data = null;

@@ -36,26 +36,34 @@ public class RxpSocket {
 		
 		@Override
 		public int read() throws IOException {
-			// If an exception has occurred somewhere else, throw it here as well.
+			byte nextByte;
+
+			// If an exception has occurred somewhere else, throw it here as
+			// well.
 			synchronized (eLock) {
 				if (exception != null) throw new IOException(exception);
 			}
 			
+			// If reading from a closed empty buffer, throw an exception
+			if (winLength == 0 && isClosed()) throw new SocketException("The socket is closed");
+			
 			// If the buffer is empty, return -1
 			if (winLength == 0) return -1;
-			
-			// This is the only method that moves the head, so reading the head
-			// doesn't need to be thread safe
-			byte nextByte = rcvWindow[winHead];
-			
-			// Move the head and update the length synchronously
-			// Other methods read the head and the length; writes in here need
-			// to be synchronized with reads elsewhere.
-			synchronized (iStream) {
-				if (++winHead == winTotalLength) winHead = 0;				
-				winLength--;
+
+			// Do not allow the window size to change while reading
+			synchronized (winLock2) {
+				// This is the only method that moves the head, so reading the
+				// head doesn't need to be thread safe
+				nextByte = rcvWindow[winHead];
+
+				// Move the head and update the length synchronously
+				// Other methods read the head and the length; writes in here
+				// need to be synchronized with reads elsewhere.
+				synchronized (iStream) {
+					if (++winHead == winTotalLength) winHead = 0;
+					winLength--;
+				}
 			}
-			
 			return nextByte;
 		}
 		
@@ -66,33 +74,39 @@ public class RxpSocket {
 			synchronized (eLock) {
 				if (exception != null) throw new IOException(exception);
 			}
+			
+			// If reading from a closed empty buffer, throw an exception
+			if (winLength == 0 && isClosed()) throw new SocketException("The socket is closed");
 
 			// If the buffer is empty, return -1
 			if (winLength == 0) return -1;
 			
 			short bytesToRead;
-			synchronized (iStream) {
-				bytesToRead = (short) Math.min(len, winLength);
-			}
 			
-			// No need to synchronize this part since it is working on the head
-			// while the other thread affects the tail
-			if (winTotalLength - winHead >= bytesToRead) {
-				// No need to wrap around
-				System.arraycopy(rcvWindow, winHead, b, off, bytesToRead);
-			} else {
-				// Need to wrap around the circular buffer
-				int i = winTotalLength - winHead;
-				System.arraycopy(rcvWindow, winHead, b, off, i);
-				System.arraycopy(rcvWindow, 0, b, off + i, bytesToRead - i);
+			// Do not allow the window size to change while reading
+			synchronized (winLock2) {
+				synchronized (iStream) {
+					bytesToRead = (short) Math.min(len, winLength);
+				}
+
+				// No need to synchronize this part since it is working on the
+				// head while the other thread affects the tail
+				if (winTotalLength - winHead >= bytesToRead) {
+					// No need to wrap around
+					System.arraycopy(rcvWindow, winHead, b, off, bytesToRead);
+				} else {
+					// Need to wrap around the circular buffer
+					int i = winTotalLength - winHead;
+					System.arraycopy(rcvWindow, winHead, b, off, i);
+					System.arraycopy(rcvWindow, 0, b, off + i, bytesToRead - i);
+				}
+
+				// Update the head and the length of the circular buffer
+				synchronized (iStream) {
+					winHead = (short) ((winHead + bytesToRead) % winTotalLength);
+					winLength -= bytesToRead;
+				}
 			}
-			
-			// Update the head and the length of the circular buffer
-			synchronized (iStream) {
-				winHead = (short) ((winHead + bytesToRead) % winTotalLength);
-				winLength -= bytesToRead;
-			}
-			
 			return bytesToRead;
 		}
 	}
@@ -138,7 +152,7 @@ public class RxpSocket {
 			}
 
 			if (state != States.ESTABLISHED)
-				throw new IllegalStateException("Data can only be sent when the connection has been established");
+				throw new SocketException("Data can only be sent when the connection has been established");
 
 			// Save the byte
 			synchronized (this) {
@@ -196,7 +210,7 @@ public class RxpSocket {
 	 * The maximum number of consecutive retries that can occur before the
 	 * socket determines that the connection has been lost.
 	 */
-	private static final int MAX_RETRIES = 5;
+	private static final int MAX_RETRIES = 10;
 	
 	/**
 	 * The timeout before considering unacknowledged packets lost, in
@@ -286,7 +300,7 @@ public class RxpSocket {
 	private final Random randGenerator;
 	
 	/** A lock used to create blocking methods*/
-	private final Object lock, eLock, winLock;
+	private final Object lock, eLock, winLock1, winLock2;
 	
 	/** Used to pass exceptions between threads*/
 	private IOException exception;
@@ -325,7 +339,8 @@ public class RxpSocket {
 		// Generate the thread lock
 		lock = new Object();
 		eLock = new Object();
-		winLock = new Object();
+		winLock1 = new Object();
+		winLock2 = new Object();
 		exception = null;
 		
 		// Start the retry counter at zero
@@ -386,10 +401,13 @@ public class RxpSocket {
 			RxpPacket finPkt = new RxpPacket(rxpSrcPort, rxpDstPort, seq, ack, getAvailWindow(), RxpPacket.FIN,
 					new byte[] { 0 });
 			sendPacket(finPkt);
+		} else if (state == States.CLOSED){
+			// Already closed, no need to do anything
+			return;
 		} else {
 			// If the connection is not in the established state, throw an
 			// error.
-			throw new IllegalStateException("The socket must be established before it can be closed");
+			throw new IllegalStateException("The socket is currently in state " + state);
 		}
 		
 		// Wait until the connection is closed before returning
@@ -532,6 +550,14 @@ public class RxpSocket {
 	}
 
 	/**
+	 * Checks whether the socket is closed or not
+	 * @return True if the socket is closed, false otherwise
+	 */
+	public boolean isClosed(){
+		return state == States.CLOSED;
+	}
+	
+	/**
 	 * Sets the size of the receiving buffer.
 	 * @param size The size of the buffer, in shorts.
 	 */
@@ -551,18 +577,21 @@ public class RxpSocket {
 			
 			// Assume set buffer size was called from the main thread, only
 			// handleData acts on the window from a distinct thread.
-			synchronized (winLock) {
-				try {
-					// Copy the window to the new buffer
-					iStream.read(newWindow, 0, winLength);
-					
-					// Reset window parameters
-					rcvWindow = newWindow;
-					winHead = 0;
-					winTotalLength = size;
-				} catch (IOException e) {}
-				// Swallow the exception. The exception is already saved in
-				// the field exception and will get rethrown later on.
+			synchronized (winLock1) {
+				synchronized (winLock2) {
+					try {
+						// Copy the window to the new buffer
+						iStream.read(newWindow, 0, winLength);
+
+						// Reset window parameters
+						rcvWindow = newWindow;
+						winHead = 0;
+						winTotalLength = size;
+					} catch (IOException e) {
+					}
+					// Swallow the exception. The exception is already saved in
+					// the field exception and will get rethrown later on.
+				}
 			}
 		}else{
 			throw new IllegalStateException(
@@ -771,7 +800,7 @@ public class RxpSocket {
 			timedWaitTimeout.start();
 			break;
 		default:
-			throw new IllegalStateException("rcvFin - ???");
+			throw new IOException("rcvFin - ??? - received FIN with " + packet.seq + " on " + state + " and on seq " + ack);
 		}
 	}
 	
@@ -891,7 +920,7 @@ public class RxpSocket {
 			return;
 		
 		// Do not allow the window size to change during save operations.
-		synchronized (winLock) {
+		synchronized (winLock1) {
 			
 			// Calculate the available length
 			int tail;
@@ -1098,7 +1127,6 @@ public class RxpSocket {
 			// A NACK should be sent to the other endpoint.
 			if (packet.isCorrupt()) {
 				sendNack();
-				System.err.println("Corrupted packet received");
 				return;
 			}
 	
@@ -1121,10 +1149,10 @@ public class RxpSocket {
 				sendTimeout.restart();
 				sendTimeout();
 			}
-			
+
 			// If the packet carries some data (or a flag), discard it if it has
 			// already been acknowledged and resend the acknowledgement. This line
-			// handles duplicate packages.
+			// handles duplicate packets.
 			if ((packet.isSyn || packet.isFin || packet.payloadLength > 0)
 					&& (ack - (packet.seq + packet.payloadLength - 1) > 0)
 					&& (state != States.LISTEN && state != States.SYN_SENT)) {
@@ -1132,17 +1160,24 @@ public class RxpSocket {
 				return;
 			}
 			
-			// If the packet is a FIN packet, handle it. Note that this function
-			// assumes that all duplicate packets have been removed.
-			if (packet.isFin){
-				handleFin(packet);
-				return;
-			}
-			
 			// If the packet is a SYN packet, handle it. Note that this function
 			// assumes that duplicate packets have been removed.
 			if (packet.isSyn){
 				handleSyn(packet);
+				return;
+			}
+			
+			// If the packet is not the next expected packet, discard it and
+			// send a nack. This handles out of order packets
+			if (packet.seq != ack) {
+				sendNack();
+				return;
+			}
+
+			// If the packet is a FIN packet, handle it. Note that this function
+			// assumes that all duplicate packets have been removed.
+			if (packet.isFin){
+				handleFin(packet);
 				return;
 			}
 			
