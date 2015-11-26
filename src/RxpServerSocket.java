@@ -27,6 +27,8 @@ public class RxpServerSocket {
 	/** True if this {@link RxpServerSocket} is closed, false otherwise*/
 	private boolean isClosed;
 	
+	private int defaultWindowSize = 4;
+	
 	public RxpServerSocket() {
 		connections = new ConcurrentHashMap<>();
 		unaccepted = new LinkedBlockingQueue<>();
@@ -46,13 +48,28 @@ public class RxpServerSocket {
 	}
 	
 	/**
+	 * Sets the size of the receiving window
+	 * 
+	 * @param segmentSize
+	 *            The number of segments in the window
+	 */
+	public void setWindowSize(int segmentSize){
+		defaultWindowSize = segmentSize;
+		// Set the size on each connection
+		connections.values().parallelStream().forEach(i -> i.setWindowSize(segmentSize));
+	}
+	
+	/**
 	 * Accepts a new connection. This method is blocking and will wait until a
 	 * connection is available.
 	 * 
 	 * @return The socket used by the connection
+	 * @throws SocketException If the socket is closed
 	 * @throws InterruptedException
 	 */
-	public RxpSocket accept(){
+	public RxpSocket accept() throws SocketException{
+		if (isClosed == true) throw new SocketException("This server socket is closed");
+		
 		try {
 			return unaccepted.take();
 		} catch (InterruptedException e) {
@@ -72,6 +89,12 @@ public class RxpServerSocket {
 		
 		// Close the socket
 		udpSocket.close();
+		
+		isClosed = true;
+	}
+	
+	public boolean isClosed(){
+		return isClosed;
 	}
 	
 	private void readPacket(){
@@ -113,6 +136,7 @@ public class RxpServerSocket {
 							udpSocket, () -> {
 								connections.remove(key);
 							});
+					rxpSocket.setWindowSize(defaultWindowSize);
 					rxpSocket.rcvPacket(rxpPacket);
 					
 					connections.put(key, rxpSocket);
