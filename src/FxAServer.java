@@ -14,11 +14,12 @@ import java.nio.file.Paths;
 import java.util.Scanner;
 
 
-public class FxAServer {
+public class FxAServer implements Runnable {
 	
 	private static RxpServerSocket serverSocket;
 	private static RxpSocket socket;
-
+	private static InputStream reader;
+	private static OutputStream writer;
 	
 	public static void main(String[] args) throws Exception {
 		
@@ -28,6 +29,7 @@ public class FxAServer {
 		InetAddress netIP = null;
 		int netPort = 0;
 		Scanner scan = new Scanner(System.in);
+		boolean connected = false;
 		
 		//Check if there are enough command line arguments and make sure they are valid
 		
@@ -52,45 +54,88 @@ public class FxAServer {
 		} catch (UnknownHostException e) {
 			System.err.println(e);
 		}
-		
+		// TODO move this so we can accept others
 		serverSocket = new RxpServerSocket();
 		serverSocket.listen(port, 2300);
 		socket = serverSocket.accept();
 		
-		InputStream reader = socket.getInputStream();
-		OutputStream writer = socket.getOutputStream();
+		reader = socket.getInputStream();
+		writer = socket.getOutputStream();
 		
-		//Wait for requests from the client
-		
-		while (true){				
-			if (reader.available() > 0){
-				byte buffer[]  = new byte[reader.available()];
-				reader.read(buffer);
-				System.out.println(new String(buffer));
-				if(new String(buffer).equals("test")) {
-					System.out.println("Test successful, I think.");
-				}
-				if(new String(buffer).length() > 3) {
-					//System.out.println(new String(buffer).substring(0,4));
-					if(new String(buffer).substring(0,4).equals("get:")) {
-						String fileName = (new String(buffer)).substring(4,(new String(buffer)).length());
-						String filePath = System.getProperty("user.dir") + "\\" + fileName;
-						byte[] file = getFileBytes(filePath);
-						
-						writer.write(file);
-						
-					}
+		FxAServer server = new FxAServer();
+		Thread receiveThread = new Thread(server); 
+		receiveThread.start();
+		//Allows a user to input commands close and window.
+		while(true) {
+			String input = scan.nextLine();
+			String [] split = input.split("\\s+");
+			
+			if (split[0].equals("close")) {
+				socket.close();
+				System.out.println("Finished Gracefully");
+				scan.close();
+				return;
+			} else if (split[0].equals("window")){
+				if(split.length>1) { 
+					try {
+			            int windowSize = Integer.parseInt(args[0]);
+			            socket.setWindowSize(windowSize);
+			        } catch (NumberFormatException e) {
+			            System.err.println("Argument " + split[1] + " must be an integer.");
+			            System.exit(1);
+			        }
+				} else {
+					System.out.println("Window requires a second input!");
 				}
 			} else {
-				try {
-					Thread.sleep(100);
-				} catch (InterruptedException e) {
-					e.printStackTrace();
-				}
+				System.out.println("Invalid command!");
 			}
 		}
 	}
+
+	@Override
+	/**
+	 * The thread method for a socket to listen to the client.
+	 * Allows for the server to be listening to the client forever
+	 * while also being able to take in user inputs.
+	 * 
+	 * 
+	 */
 	
+	public void run() {
+		while (true){				
+			try {
+				if (reader.available() > 0){
+					byte buffer[]  = new byte[reader.available()];
+					reader.read(buffer);
+					System.out.println(new String(buffer));
+					if(new String(buffer).equals("test")) {						//TODO remove this at the end
+						System.out.println("Test successful, I think.");
+					}
+					if(new String(buffer).length() > 3) {
+						//System.out.println(new String(buffer).substring(0,4));
+						if(new String(buffer).substring(0,4).equals("get:")) {
+							String fileName = (new String(buffer)).substring(4,(new String(buffer)).length());
+							String filePath = System.getProperty("user.dir") + "\\" + fileName;
+							byte[] file = getFileBytes(filePath);
+							
+							writer.write(file);
+							
+						}
+					}
+				} else {
+					try {
+						Thread.sleep(100);
+					} catch (InterruptedException e) {
+						e.printStackTrace();
+					}
+				}
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+	}
+ 	
 	/**
 	 * Takes in the pathname of a file and converts the contents of the file into
 	 * a byte array.
