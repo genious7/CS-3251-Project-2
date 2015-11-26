@@ -4,6 +4,7 @@ import java.io.OutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.SocketAddress;
+import java.net.SocketException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
@@ -479,6 +480,8 @@ public class RxpSocket {
 					srcSocket.receive(packet);
 					RxpPacket parsedPacket = new RxpPacket(rcvd);
 					rcvPacket(parsedPacket);
+				} catch (SocketException e){
+					// If the socket was closed, just ignore the exception.
 				} catch (IOException e) {
 					// If an error occurs while reading the packet, pass it to the main thread
 					synchronized (eLock) {
@@ -757,7 +760,7 @@ public class RxpSocket {
 			break;
 		case FIN_WAIT_2:
 			// Fin's in Established should not have any other flag set
-			if (packet.isAck || packet.isSyn || !packet.isFin || packet.isNack)
+			if (packet.isSyn || !packet.isFin || packet.isNack)
 				throw new IllegalStateException("rcvFin - FIN packets should not have other flags set");
 
 			// Change the state to CLOSING

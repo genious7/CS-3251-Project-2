@@ -112,7 +112,6 @@ public class RxpServerSocket {
 					RxpSocket rxpSocket = new RxpSocket(rxpSrcPort, rxpPacket.sourcePort, packet.getSocketAddress(),
 							udpSocket, () -> {
 								connections.remove(key);
-								System.out.println("Finished gracefully");
 							});
 					rxpSocket.rcvPacket(rxpPacket);
 					
@@ -122,6 +121,8 @@ public class RxpServerSocket {
 					unaccepted.add(rxpSocket);
 				}
 			}
+		} catch (SocketException e){
+			// Note that when the socket is closed, this exception will be thrown. Ignore it.
 		} catch (IOException e) {
 			e.printStackTrace();
 		}
