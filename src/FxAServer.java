@@ -100,17 +100,25 @@ public class FxAServer {
 
 					switch (split[0]) {
 					case "get":
-						File inputFile = new File(split[1]);
-						byte fileContent[] = Files.readAllBytes(inputFile.toPath());
-
-						// Send the file length
-						byte[] lengthTmp = new byte[4];
-						ByteBuffer buffer = ByteBuffer.wrap(lengthTmp);
-						buffer.putInt(fileContent.length);
-						writer.write(lengthTmp);
-
-						// Send the file
-						writer.write(fileContent);
+						try {
+							File inputFile = new File(split[1]);
+							byte fileContent[] = Files.readAllBytes(inputFile.toPath());
+	
+							// Send the file length
+							byte[] lengthTmp = new byte[4];
+							ByteBuffer buffer = ByteBuffer.wrap(lengthTmp);
+							buffer.putInt(fileContent.length);
+							writer.write(lengthTmp);
+	
+							// Send the file
+							writer.write(fileContent);
+						} catch (NoSuchFileException e) {
+							System.out.println("File does not exist!");
+							byte[] lengthTmp = new byte[4];
+							ByteBuffer buffer = ByteBuffer.wrap(lengthTmp);
+							buffer.putInt(-1);
+							writer.write(lengthTmp);
+						}	
 						break;
 					case "put":
 						String fileName = split[1];
