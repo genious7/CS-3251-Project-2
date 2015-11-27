@@ -84,14 +84,18 @@ public class FxAClient {
 						readNBytes(reader, fileSizeTmp);
 						ByteBuffer tmp = ByteBuffer.wrap(fileSizeTmp);
 						int fileSize = tmp.getInt();
-
-						// Create the destination byte array
-						byte fileContent[] = new byte[fileSize];
-						readNBytes(reader, fileContent);
-
-						// Write the file
-						File file = new File(fileName + ".bak");
-						Files.write(file.toPath(), fileContent, StandardOpenOption.CREATE);
+						
+						if(fileSize == -1) {
+							System.out.println("File does not exist!");
+						} else {
+							// Create the destination byte array
+							byte fileContent[] = new byte[fileSize];
+							readNBytes(reader, fileContent);
+	
+							// Write the file
+							File file = new File(fileName + ".bak");
+							Files.write(file.toPath(), fileContent, StandardOpenOption.CREATE);
+						}
 					} else if (split.length == 1) {
 						System.out.println("Get requires a second input!");
 					} else {
@@ -100,21 +104,26 @@ public class FxAClient {
 					break;
 				case "put":
 					if (connected && split.length == 2) {
-						File inputFile = new File(split[1]);
-						byte fileContent[] = Files.readAllBytes(inputFile.toPath());
-
-						// Send the null terminated put command
-						String putRequest = "put:" + split[1] + "\0";
-						writer.write(putRequest.getBytes());
-
-						// Send the file length
-						byte[] lengthTmp = new byte[4];
-						ByteBuffer buffer = ByteBuffer.wrap(lengthTmp);
-						buffer.putInt(fileContent.length);
-						writer.write(lengthTmp);
-
-						// Send the file
-						writer.write(fileContent);
+						try {
+							File inputFile = new File(split[1]);
+							byte fileContent[] = Files.readAllBytes(inputFile.toPath());
+	
+							// Send the null terminated put command
+							String putRequest = "put:" + split[1] + "\0";
+							writer.write(putRequest.getBytes());
+	
+							// Send the file length
+						
+							byte[] lengthTmp = new byte[4];
+							ByteBuffer buffer = ByteBuffer.wrap(lengthTmp);
+							buffer.putInt(fileContent.length);
+							writer.write(lengthTmp);
+	
+							// Send the file
+							writer.write(fileContent);
+						} catch (NoSuchFileException e){
+							System.out.println("File does not exist!");
+						}
 					} else if (split.length == 1) {
 						System.err.println("Put requires a second input!");
 					} else {
