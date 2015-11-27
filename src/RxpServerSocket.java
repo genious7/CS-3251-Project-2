@@ -3,6 +3,8 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.SocketAddress;
 import java.net.SocketException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,9 +29,12 @@ public class RxpServerSocket {
 	/** True if this {@link RxpServerSocket} is closed, false otherwise*/
 	private boolean isClosed;
 	
+	private final List<Thread> awaitingConection;
+	
 	private int defaultWindowSize = 4;
 	
 	public RxpServerSocket() {
+		awaitingConection = new ArrayList<>();
 		connections = new ConcurrentHashMap<>();
 		unaccepted = new LinkedBlockingQueue<>();
 		packetReader = new Thread(() -> readPacket());
@@ -70,11 +75,14 @@ public class RxpServerSocket {
 	public RxpSocket accept() throws SocketException{
 		if (isClosed == true) throw new SocketException("This server socket is closed");
 		
+		awaitingConection.add(Thread.currentThread());
+		
 		try {
-			return unaccepted.take();
+			RxpSocket socket = unaccepted.take();
+			awaitingConection.remove(Thread.currentThread());
+			return socket;
 		} catch (InterruptedException e) {
-			e.printStackTrace();
-			return null;
+			throw new SocketException("The serverSocket has been closed");
 		}
 	}
 	
@@ -89,8 +97,10 @@ public class RxpServerSocket {
 		
 		// Close the socket
 		udpSocket.close();
-		
 		isClosed = true;
+		
+		// Awaken any thread waiting on accept
+		awaitingConection.forEach(t->t.interrupt());
 	}
 	
 	public boolean isClosed(){
