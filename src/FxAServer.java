@@ -36,30 +36,42 @@ public class FxAServer {
 		serverSocket.listen(srcUdpPort, 2300);
 		
 		final Scanner textInput = new Scanner(System.in);
+		
+		
+		
 		new Thread(()->{
-			String command = textInput.nextLine();
-			String[] split = command.toString().split(":");
-			switch (split[0]) {
-			case "window":
-				if (split.length != 2){
-					System.err.println("The window command has two parameters");
-				} else {
-					try{
-						serverSocket.setWindowSize(Integer.parseInt(split[1]));
-					} catch (NumberFormatException e){
-						System.err.println("The second parameter must be a number");
-					}					
+			while(true) {
+				String command = textInput.nextLine();
+				String[] split = command.toString().split(":");
+				boolean setClose = false;
+				
+				switch (split[0]) {
+				case "window":
+					if (split.length != 2){
+						System.err.println("The window command has two parameters");
+					} else {
+						try{
+							serverSocket.setWindowSize(Integer.parseInt(split[1]));
+						} catch (NumberFormatException e){
+							System.err.println("The second parameter must be a number");
+						}					
+					}
+					break;
+				case "terminate":
+					try {
+						serverSocket.close();
+						textInput.close();
+						setClose = true;
+						
+					} catch (Exception e) {}
+					break;
+				default:
+					System.err.println("Command not recognized");
+					break;
 				}
-				break;
-			case "terminate":
-				try {
-					serverSocket.close();
-					textInput.close();
-				} catch (Exception e) {}
-				break;
-			default:
-				System.err.println("Command not recognized");
-				break;
+				if(setClose) {
+					break;
+				}
 			}
 		}).start();
 		
